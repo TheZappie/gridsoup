@@ -52,35 +52,41 @@ def sample_gen(dataset, xy, indexes=None, masked=False):
     elif isinstance(indexes, int):
         indexes = [indexes]
 
-    nodata = np.full(len(indexes), (dataset.nodata or 0),  dtype=dataset.dtypes[0])
+    nodata = np.full(len(indexes), (dataset.nodata or 0), dtype=dataset.dtypes[0])
     if masked:
         # Masks for masked arrays are inverted (False means valid)
-        mask = [MaskFlags.all_valid not in dataset.mask_flag_enums[i-1] for i in indexes]
+        mask = [MaskFlags.all_valid not in dataset.mask_flag_enums[i - 1] for i in indexes]
         nodata = np.ma.array(nodata, mask=mask)
 
-    for pts in _grouper(xy, 256):
-        pts = list(zip(*filter(None, pts)))
-
-        for (xp, yp), row_off, col_off in zip(xy, *rowcol(dt, *pts, op=math.floor)):
-            if row_off < 0 or col_off < 0 or row_off >= height or col_off >= width:
-                yield nodata
-            else:
-                window = Window(col_off, row_off, 2, 2)
-                data = read(indexes, window=window, masked=masked)
-                # watch out, transform_xy requires rows then cols instead of Window
-                x, y = transform_xy(dt, rows=[row_off, row_off + 1], cols=[col_off, col_off + 1], offset='ul')
-                if x[0] > x[1]:
-                    x_order = -1
-                else:
-                    x_order = 1
-                if y[0] > y[1]:
-                    y_order = -1
-                else:
-                    y_order = 1
-                locs = (x[::x_order], y[::y_order])
-                result = []
-                for band in range(len(indexes)):
-                    # use bounds_error=False to avoid floating point mess
-                    interpolator = RegularGridInterpolator(locs, data[band, ::x_order, ::y_order], bounds_error=False)
-                    result.append(float(interpolator((xp, yp))))
-                yield result
+    for (xp, yp) in xy:
+        # dt.is_rectilinear
+        if dt.a > 0 or dt.d > 0:
+            dx_step = 1
+        else:
+            dx_step = -1
+        if dt.b > 0 or dt.e > 0:
+            dy_step = 1
+        else:
+            dy_step = -1
+        row_off, col_off = rowcol(dt, xp, yp, np.round)
+        if row_off < 0 or col_off < 0 or row_off >= height or col_off >= width:
+            yield nodata
+        else:
+            window = Window(col_off + ((dx_step-1)/2) - 1, row_off + ((dy_step-1)/2), 2, 2)
+            data = read(indexes, window=window, masked=masked)
+            # watch out, transform_xy requires rows then cols instead of Window
+            x, y = transform_xy(dt, rows=[row_off, row_off + dy_step], cols=[col_off - 1, col_off + dx_step - 1], offset='center')
+            # x, y = transform_xy(dt, rows=[row_off - 1, row_off, row_off + 1], cols=[col_off - 1, col_off, col_off + 1],
+            #                     offset='center')
+            # locs = (x[::dx_step], y[::dy_step])
+            locs = (x, y)
+            # Locs should have the same shape as data, when data is partly outside window
+            _, n, m = data.shape
+            locs_corrected = locs[1][:n], locs[0][:m]
+            result = []
+            for band in range(len(indexes)):
+                # use bounds_error=False to avoid floating point mess
+                # fill_value only needed at the edge
+                interpolator = RegularGridInterpolator(locs_corrected, data[band, ::1, ::1], bounds_error=False, fill_value=np.nan) #data[band, ::1, ::1].mean()
+                result.append(float(interpolator((yp, xp), method='linear')))
+            yield result
